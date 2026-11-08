@@ -284,6 +284,8 @@ select:disabled, input:disabled { opacity: .7; }
 (function () {
   'use strict';
   var cfg = window.F1_CONFIG || {};
+  if (cfg.url) cfg.url = String(cfg.url).trim().replace(/\/rest\/v1.*$/, '').replace(/\/+$/, '');
+  if (cfg.key) cfg.key = String(cfg.key).trim();
   var KEY = 'f1code', mem = '';
   function getCode() { try { return localStorage.getItem(KEY) || mem; } catch (e) { return mem; } }
   function setCode(c) { mem = c; try { localStorage.setItem(KEY, c); } catch (e) {} }
@@ -1431,7 +1433,7 @@ async function boot() {
   var claude = window.claude;
   var db, user;
   try { db = await claude.use('db'); user = await claude.use('user'); }
-  catch (e) { fail(e && e.message === 'config' ? 'This page is not connected to its database yet (config.js).' : 'Could not reach the league. Check your connection and refresh the page.'); return; }
+  catch (e) { fail(e && e.message === 'config' ? 'This page is not connected to its database yet (config.js).' : 'Could not reach the league (' + ((e && e.message) || 'unknown') + '). Check your connection and refresh the page.'); return; }
   var so = document.getElementById('signout'); if (so) so.addEventListener('click', function (e) { e.preventDefault(); claude.signOut(); });
   S.db = db;
   try { S.uid = user ? await user.id() : null; S.isAdmin = user ? await user.canEdit() : false; } catch (e) {}
