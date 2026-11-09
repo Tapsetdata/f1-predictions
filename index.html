@@ -2,13 +2,15 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>F1 Predictions</title>
 <meta name="description" content="A private F1 prediction game for friends.">
 <meta name="theme-color" content="#0C0D12">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="F1 Predictions">
 <meta name="robots" content="noindex">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700&family=Barlow+Condensed:ital,wght@0,600;0,700;1,600;1,700;1,800&display=swap">
 <style>
 /* Layout concept: a race-control timing screen. Carbon-dark ground, F1 red for action,
@@ -219,7 +221,7 @@ a { color: var(--accent-fg); }
 .field { display: flex; flex-direction: column; gap: 6px; padding: 10px 0; min-width: 0; }
 .field label, .field .lbl { font-weight: 600; display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
 .field .rule { font-size: 13px; color: var(--muted); }
-.field select, .field input[type="number"], .field input[type="datetime-local"], .field input[type="text"], .field input[type="date"], .field textarea, .sel {
+.field select, .field input[type="email"], .field input[type="number"], .field input[type="datetime-local"], .field input[type="text"], .field input[type="date"], .field textarea, .sel {
   width: 100%; min-height: 48px; padding: 8px 12px; border-radius: 4px; border: 1px solid var(--line); background-color: var(--surface-2); color: var(--ink);
 }
 .field textarea { font-family: var(--font-body); }
@@ -376,7 +378,12 @@ select:disabled, input:disabled { opacity: .7; }
           }
         };
       },
-      newCode: function (num) { return after(rpc('admin_new_code', { p_code: code, p_num: num })); }
+      newCode: function (num) { return after(rpc('admin_new_code', { p_code: code, p_num: num })); },
+      getPrefs: function () { return rpc('get_prefs', { p_code: code }); },
+      savePrefs: function (email, on) { return rpc('save_prefs', { p_code: code, p_email: email, p_email_on: !!on }); },
+      savePushSub: function (endpoint, p256dh, auth) { return rpc('save_push_sub', { p_code: code, p_endpoint: endpoint, p_p256dh: p256dh, p_auth: auth }); },
+      removePushSub: function (endpoint) { return rpc('remove_push_sub', { p_code: code, p_endpoint: endpoint }); },
+      sendTest: function () { return rpc('send_test', { p_code: code }); }
     };
   }
 
@@ -849,7 +856,7 @@ function viewRaces() {
     h('span', { class: 'rn' }, 'Pre-season'), h('span', { class: 'nm' }, h('span', { class: 'dot ' + (seasonLocked() ? 'locked' : 'open') }), 'Season picks'));
   var chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Rounds' }, [seasonChip].concat(S.rounds.map(function (x) {
     var state = x.done ? 'done' : (isLocked(x) ? 'locked' : 'open');
-    return h('button', { class: 'chip', 'aria-pressed': String(x.id === S.raceId), onclick: function () { S.raceId = x.id; S.openPick = null; render(); } },
+    return h('button', { class: 'chip', 'data-next': (nr && x.id === nr.id) ? '1' : null, 'aria-pressed': String(x.id === S.raceId), onclick: function () { S.raceId = x.id; S.openPick = null; render(); } },
       h('span', { class: 'rn' }, 'Round ' + x.round + (x.sprint ? ' \u00B7 Sprint' : '')), h('span', { class: 'nm' }, h('span', { class: 'dot ' + state }), x.name), h('span', { class: 'wk' }, weekendOf(x)));
   })));
   if (S.raceId === 'season') return h('div', { class: 'stack' }, h('div', null, chips), seasonCard());
@@ -1168,6 +1175,77 @@ function seg2(id, label, current, a, b, onPick) {
   [a, b].forEach(function (x) { el.append(h('button', { type: 'button', role: 'radio', 'aria-checked': String(current === x[1]), onclick: function () { onPick(x[1]); } }, x[0])); });
   return el;
 }
+/* ---------- reminders (push + email) ---------- */
+var REM = { prefs: null, loaded: false, thisDevice: null, status: null, email: null, emailOn: false, busy: false };
+function isIos() { return /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1); }
+function isStandalone() { return !!(navigator.standalone || (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)); }
+function pushSupported() { return !!(window.F1_CONFIG && window.F1_CONFIG.vapid) && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window; }
+function b64uToU8(s) { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; var b = atob(s), o = new Uint8Array(b.length); for (var i = 0; i < b.length; i++) o[i] = b.charCodeAt(i); return o; }
+function remError(e) { var c = e && (e.code || e.message); return c === 'bad_email' ? 'Enter a valid email address.' : 'Something went wrong. Check your connection and try again.'; }
+function remDevice() {
+  if (!pushSupported()) { REM.thisDevice = false; return Promise.resolve(); }
+  return navigator.serviceWorker.getRegistration().then(function (reg) { return reg ? reg.pushManager.getSubscription() : null; })
+    .then(function (sub) { REM.thisDevice = !!sub; }, function () { REM.thisDevice = false; });
+}
+function remLoad() {
+  REM.loaded = true;
+  Promise.all([S.db.getPrefs(), remDevice()]).then(function (r) {
+    REM.prefs = r[0]; if (REM.email === null) { REM.email = r[0].email || ''; REM.emailOn = !!r[0].emailOn; } render(true);
+  }).catch(function () { REM.loaded = false; });
+}
+function remSet(kind, text) { REM.status = { kind: kind, text: text }; render(true); }
+function remSaveEmail() {
+  REM.busy = true; remSet('', 'Saving…');
+  S.db.savePrefs(REM.email, REM.emailOn).then(function (p) { REM.prefs = p; REM.busy = false; remSet('ok', REM.emailOn ? 'Saved. Email reminders are on.' : 'Saved. Email reminders are off.'); },
+    function (e) { REM.busy = false; remSet('bad', remError(e)); });
+}
+function remEnablePush() {
+  var perm = Notification.requestPermission();
+  remSet('', 'Waiting for your permission…');
+  Promise.resolve(perm).then(function (p) {
+    if (p !== 'granted') throw new Error('denied');
+    return navigator.serviceWorker.ready;
+  }).then(function (reg) {
+    return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64uToU8(window.F1_CONFIG.vapid) });
+  }).then(function (sub) {
+    var j = sub.toJSON(); return S.db.savePushSub(j.endpoint, j.keys.p256dh, j.keys.auth);
+  }).then(function (p) { REM.prefs = p; REM.thisDevice = true; remSet('ok', 'Push reminders are on for this device. Tap "Send me a test" to check.'); },
+    function (e) { remSet('bad', e && e.message === 'denied' ? 'Permission was not given, so push stays off.' : 'Could not turn on push (' + ((e && e.message) || 'error') + ').'); });
+}
+function remDisablePush() {
+  navigator.serviceWorker.getRegistration().then(function (reg) { return reg ? reg.pushManager.getSubscription() : null; }).then(function (sub) {
+    if (!sub) return null; var ep = sub.endpoint; return sub.unsubscribe().then(function () { return S.db.removePushSub(ep); });
+  }).then(function (p) { if (p) REM.prefs = p; REM.thisDevice = false; remSet('ok', 'Push reminders are off for this device.'); },
+    function () { remSet('bad', 'Could not turn push off. Try again.'); });
+}
+function remTest() {
+  remSet('', 'Sending…');
+  S.db.sendTest().then(function (r) { remSet('ok', r && r.throttled ? 'A test was just sent. Wait a moment and try again.' : 'Test sent. It should arrive within a minute. Check your junk folder for the email.'); },
+    function () { remSet('bad', 'Could not send the test.'); });
+}
+function remindersCard() {
+  if (!REM.loaded) remLoad();
+  var P = REM.prefs || { email: '', emailOn: false, devices: 0 }, ios = isIos(), pushUi;
+  if (!(window.F1_CONFIG && window.F1_CONFIG.vapid)) pushUi = h('p', { class: 'small muted' }, 'Push reminders are not set up yet.');
+  else if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+    pushUi = h('p', { class: 'small muted' }, ios && !isStandalone()
+      ? 'To get push notifications on an iPhone or iPad, first add this page to your Home Screen: tap the Share button, choose Add to Home Screen, then open the app from its new icon and come back to this card.'
+      : 'This browser does not support push notifications.');
+  } else if (Notification.permission === 'denied') pushUi = h('p', { class: 'small muted' }, 'Notifications are blocked for this site. Allow them in your device settings, then come back here.');
+  else if (REM.thisDevice) pushUi = h('div', null, h('p', { class: 'small' }, 'Push reminders are on for this device.'),
+    h('div', { class: 'row' }, h('button', { class: 'btn', onclick: remTest }, 'Send me a test'), h('button', { class: 'btn', onclick: remDisablePush }, 'Turn off on this device')));
+  else pushUi = h('div', null, h('button', { class: 'btn primary', onclick: remEnablePush }, 'Turn on push on this device'),
+    P.devices > 0 ? h('p', { class: 'small muted' }, 'Push is already on for ' + P.devices + ' other device' + (P.devices > 1 ? 's' : '') + '.') : null);
+  return h('section', { class: 'card', id: 'reminders' }, h('h2', null, 'Reminders'),
+    h('p', { class: 'small muted' }, 'A nudge before each cut-off, only if your picks are not complete. Daily in the final week, then twice a week before that (email: every other day in the final week).'),
+    h('h3', null, 'Push notifications'), pushUi,
+    h('h3', null, 'Email'),
+    h('div', { class: 'field' }, h('label', { for: 'rem-email' }, 'Your email address'),
+      h('input', { id: 'rem-email', type: 'email', autocomplete: 'email', inputmode: 'email', value: REM.email === null ? (P.email || '') : REM.email, oninput: function (e) { REM.email = e.target.value; } })),
+    h('label', { class: 'check', style: 'display:flex;gap:10px;align-items:center;margin:8px 0' }, h('input', { type: 'checkbox', id: 'rem-email-on', checked: REM.emailOn, onchange: function (e) { REM.emailOn = e.target.checked; } }), h('span', null, 'Email me reminders')),
+    h('div', { class: 'row' }, h('button', { class: 'btn', id: 'rem-save', onclick: remSaveEmail }, 'Save email settings')),
+    h('div', { class: 'row', style: 'margin-top:10px' }, stat(REM.status)));
+}
 function stat(st) { return h('span', { class: 'status' + (st && st.kind ? ' ' + st.kind : '') }, st ? st.text : ''); }
 
 function viewAdmin() {
@@ -1304,7 +1382,18 @@ function saveSeasonAdmin() {
     .catch(function () { A.seasonStatus = { kind: 'bad', text: 'Could not save' }; render(true); });
 }
 function fmtCode(c) { return c ? c.slice(0, 4) + '-' + c.slice(4) : ''; }
-function inviteText(p) { return 'Hi ' + p.name.split(' ')[0] + ', your F1 predictions code is ' + fmtCode(p.code) + '. Open ' + location.href.split('#')[0] + ' and enter it once. It is personal to you, so please do not share it.'; }
+function inviteText(p) {
+  var url = location.href.split('#')[0];
+  return 'Hi ' + p.name.split(' ')[0] + ', you are in the F1 predictions game!\n\n' +
+    'Set up in 4 steps:\n\n' +
+    '1. Open this link in Safari:\n' + url + '\n\n' +
+    '2. Add it to your Home Screen: tap the Share button (the square with an arrow), choose Add to Home Screen, then Add.\n\n' +
+    '3. Open the F1 icon on your Home Screen and enter your personal code (you only need to do this once):\n' + fmtCode(p.code) + '\n\n' +
+    '4. Turn on reminders: tap My picks, scroll down to Reminders, tap Turn on push on this device and choose Allow. You can add your email there too.\n\n' +
+    'Then make your picks before each cut-off. Everyone else\'s picks stay hidden until the cut-off passes.\n\n' +
+    'On an Android phone: open the link in Chrome, tap the menu (three dots), choose Add to Home screen, then carry on from step 3.\n\n' +
+    'Your code is personal to you, so please do not share it.';
+}
 function copyText(txt, btn) {
   var done = function () { var o = btn.textContent; btn.textContent = 'Copied'; setTimeout(function () { btn.textContent = o; }, 1500); };
   var ta = h('textarea', { style: 'position:fixed;opacity:0;left:-999px' }); ta.value = txt; document.body.append(ta);
@@ -1382,6 +1471,15 @@ function render(force) {
     root.scrollTop = y;
   } else root.scrollTop = 0;
   $view.style.minHeight = '';
+  if (S.tab === 'races') {
+    if (!same) S._centerNext = true;
+    var nx = document.querySelector('.chips .chip[data-next]');
+    if (S._centerNext && nx) {
+      var st = nx.parentNode;
+      st.scrollLeft += nx.getBoundingClientRect().left - st.getBoundingClientRect().left - (st.clientWidth - nx.offsetWidth) / 2;
+      S._centerNext = false;
+    }
+  } else S._centerNext = false;
 }
 function renderInner(force) {
   if (!force && ((S.tab === 'picks' && (S.dirty || S.seasonDirty)) || (S.tab === 'admin' && (S.adm.dirty || S.adm.seasonDirty || S.adm.other)))) return;
@@ -1395,6 +1493,7 @@ function renderInner(force) {
   }
   var v = S.tab === 'races' ? viewRaces() : S.tab === 'picks' ? viewPicks() : S.tab === 'admin' ? viewAdmin() : viewStandings();
   $view.append(v);
+  if (S.tab === 'picks' && S.me && !S.actAs && S.db) $view.append(remindersCard());
   if (S.tab === 'picks' && S.stale) $view.prepend(h('div', { class: 'notice' }, 'Showing saved data. It may be out of date.'));
 }
 function onHash() {
@@ -1434,6 +1533,7 @@ async function boot() {
   var db, user;
   try { db = await claude.use('db'); user = await claude.use('user'); }
   catch (e) { fail(e && e.message === 'config' ? 'This page is not connected to its database yet (config.js).' : 'Could not reach the league (' + ((e && e.message) || 'unknown') + '). Check your connection and refresh the page.'); return; }
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
   var so = document.getElementById('signout'); if (so) so.addEventListener('click', function (e) { e.preventDefault(); claude.signOut(); });
   S.db = db;
   try { S.uid = user ? await user.id() : null; S.isAdmin = user ? await user.canEdit() : false; } catch (e) {}
