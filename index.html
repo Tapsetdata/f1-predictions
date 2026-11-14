@@ -140,8 +140,11 @@ h1 { font-weight: 800; font-size: 34px; line-height: .95; letter-spacing: .01em;
 .t-row.me { background: var(--accent-soft); }
 .t-head { padding: 8px 14px; font-weight: 600; font-size: 13px; color: var(--muted); background: var(--surface-2); }
 .t-head span:nth-child(n+3), .t-row .r { text-align: right; }
-.int { display: none; }
-@media (min-width: 560px) { .t-row, .t-head { grid-template-columns: 2.8rem minmax(0, 1fr) 4rem 4rem 4.2rem; } .int { display: block; } }
+.t-row, .t-head { grid-template-columns: 2.8rem minmax(0, 1fr) 4.5rem 3.8rem; }
+.gapsw { display: inline-flex; align-items: center; gap: 3px; justify-self: end; margin: -6px -6px -6px 0; padding: 6px; min-height: 36px; background: none; border: 0; font-size: 12px; font-weight: 600; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.gapsw b { font-weight: 600; padding: 2px 4px; border-radius: 3px; }
+.entry.in { color: var(--hit); font-weight: 600; }
+.gapsw b.on { background: var(--ink); color: var(--bg); font-weight: 700; }
 .pos { display: grid; place-items: center; height: 34px; border-radius: 3px; background: var(--surface-2); font-weight: 800; font-size: 22px; }
 .t-row[aria-expanded="true"] .pos, .t-row.me .pos { background: var(--bg); }
 .pos.lead { background: var(--accent) !important; color: var(--accent-ink); }
@@ -314,7 +317,12 @@ select:disabled, input:disabled { opacity: .7; }
     var s = st, cfgs = s.config || {}, out = {};
     out.players = s.players.map(function (p) { return { id: 'p' + p.num, data: p }; });
     out.rounds = s.rounds.map(function (r) { return { id: r.id, data: r }; });
-    out.claims = s.players.map(function (p) { return { id: 'u' + p.num, data: { player: p.num } }; });
+    var ent = s.entered || null;
+    out.claims = s.players.map(function (p) {
+      var d = { player: p.num };
+      if (ent) { d.entered = {}; Object.keys(ent).forEach(function (rid) { d.entered[rid] = (ent[rid] && ent[rid][p.num]) || 0; }); }
+      return { id: 'u' + p.num, data: d };
+    });
     out.picks = s.picks.map(function (p) { return { id: 'u' + p.num, data: p }; });
     out['config/league'] = cfgs.league || null;
     out['config/drivers'] = cfgs.drivers || null;
@@ -618,6 +626,7 @@ function driverChanges(r) {
 }
 function roundById(id) { return S.rounds.find(function (r) { return r.id === id; }); }
 function isLocked(r) { return !!(r && (r.done || (r.lockAt && Date.now() >= Date.parse(r.lockAt)))); }
+try { S.gapMode = localStorage.getItem('f1gap') === 'int' ? 'int' : 'gap'; } catch (e) { S.gapMode = 'gap'; }
 function nextRound() { return S.rounds.find(function (r) { return !r.done; }) || null; }
 function lastDone() { var d = S.rounds.filter(function (r) { return r.done; }); return d.length ? d[d.length - 1] : null; }
 function rawPicksOf(num, rid) { var d = S.picks[num]; return d && d.rounds ? d.rounds[rid] : undefined; }
@@ -631,6 +640,11 @@ function mapPicks(r, pk) {
     out[k] = (c && c.type === 'driver' && v && sw[v]) ? sw[v] : v;
   });
   return out;
+}
+/* How many of the 16 picks a player has made for a round. null = not known (server not updated yet). */
+function entryCount(num, rid, visible) {
+  if (visible) { var pk = picksOf(num, rid); return pk ? CATS.filter(function (c) { return pk[c.key] != null && pk[c.key] !== ''; }).length : 0; }
+  var c = S.claims['u' + num], e = c && c.entered; return e && e[rid] != null ? e[rid] : (e ? 0 : null);
 }
 function picksOf(num, rid) { return mapPicks(roundById(rid), rawPicksOf(num, rid)); }
 function swappedNote(r, num) {
@@ -732,15 +746,18 @@ function viewStandings() {
 
   var list = h('ol', { class: 'tower' });
   list.append(h('li', null, h('div', { class: 't-head' },
-    h('span', null, 'Pos'), h('span', null, 'Player'), h('span', { class: 'int' }, 'Int'), h('span', null, 'Gap'), h('span', null, 'Pts'))));
+    h('span', null, 'Pos'), h('span', null, 'Player'),
+    h('button', { class: 'gapsw', id: 'gapsw', type: 'button', 'aria-label': 'Showing ' + (S.gapMode === 'int' ? 'interval to the player ahead' : 'gap to the leader') + '. Tap to switch.',
+      onclick: function () { S.gapMode = S.gapMode === 'int' ? 'gap' : 'int'; try { localStorage.setItem('f1gap', S.gapMode); } catch (e) {} render(); } },
+      h('b', { class: S.gapMode === 'int' ? '' : 'on' }, 'Gap'), h('b', { class: S.gapMode === 'int' ? 'on' : '' }, 'Int')),
+    h('span', null, 'Pts'))));
   st.rows.forEach(function (r, i) {
     var prev = i ? st.rows[i - 1] : null, lead = st.rows[0];
     var open = S.openPlayer === r.p.num, me = S.me && S.me.num === r.p.num;
     var btn = h('button', { class: 't-row' + (me ? ' me' : ''), 'aria-expanded': String(open), onclick: function () { S.openPlayer = open ? null : r.p.num; render(); } },
       h('span', { class: 'pos num' + (r.pos === 1 ? ' lead' : '') }, r.pos),
       h('span', { class: 'pname' }, h('i', { class: 'stripe', style: 'background:' + playerColor(r.p.num) }), h('span', { class: 'nm-t' }, r.p.name, h('small', null, '#' + r.p.num)), me ? h('em', { class: 'you' }, 'You') : null),
-      h('span', { class: 'gap num r int' }, prev ? '+' + (prev.total - r.total) : '—'),
-      h('span', { class: 'gap num r' }, i ? '+' + (lead.total - r.total) : '—'),
+      h('span', { class: 'gap num r' }, !i ? '—' : '+' + (S.gapMode === 'int' ? prev.total - r.total : lead.total - r.total)),
       h('span', { class: 'pts num r' }, r.total));
     var li = h('li', null, btn);
     if (open) li.append(playerDetail(r, st.done));
@@ -852,7 +869,7 @@ function emptyState() {
 /* ---------- races ---------- */
 function viewRaces() {
   if (!S.rounds.length) return emptyState();
-  if (S.raceId !== 'season' && (!S.raceId || !roundById(S.raceId))) { var ld = lastDone() || nextRound() || S.rounds[0]; S.raceId = ld.id; }
+  if (S.raceId !== 'season' && (!S.raceId || !roundById(S.raceId))) { var ld = nextRound() || lastDone() || S.rounds[0]; S.raceId = ld.id; }
   var r = roundById(S.raceId), nr = nextRound();
   var seasonChip = h('button', { class: 'chip', 'aria-pressed': String(S.raceId === 'season'), onclick: function () { S.raceId = 'season'; S.openPick = null; render(); } },
     h('span', { class: 'rn' }, 'Pre-season'), h('span', { class: 'nm' }, h('span', { class: 'dot ' + (seasonLocked() ? 'locked' : 'open') }), 'Season picks'));
@@ -882,7 +899,7 @@ function viewRaces() {
   rows.forEach(function (x) {
     var open = S.openPick === x.p.num;
     var visible = canSee(x.p);
-    var right = r.done ? h('b', { class: 'pts num' }, x.sc.total) : h('span', { class: 'muted small' }, x.entered ? 'Picks in' : 'No picks');
+    var right = r.done ? h('b', { class: 'pts num' }, x.sc.total) : (function () { var n = entryCount(x.p.num, r.id, visible || S.isAdmin); return h('span', { class: 'small entry ' + (n === CATS.length ? 'in' : 'muted') }, n == null ? '' : n >= CATS.length ? 'Picks in' : n ? 'Part done' : 'No picks'); })();
     var li = h('li', null, h('button', { class: 'pl-row', 'aria-expanded': String(open), disabled: !visible, onclick: function () { S.openPick = open ? null : x.p.num; render(); } },
       h('span', { class: 'pname' }, x.p.name, h('small', null, '#' + x.p.num)),
       !r.done && !visible ? h('span', { class: 'pill' }, 'Hidden until lock') : (r.done && !x.entered ? h('span', { class: 'pill' }, 'DNS') : null),
